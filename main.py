@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from openai import OpenAI, RateLimitError
 
 TEMPERATURES = [0, 0.7, 1.0]
-RUNS_PER_TEMPERATURE = 3
+RUNS_PER_TEMPERATURE = 1
 PREVIEW_CHARS = 40
 
 # --- Config: fail fast if anything is missing --------------------------------
@@ -45,6 +45,12 @@ def read_usage(chunk):
         return groq_usage["prompt_tokens"], groq_usage["completion_tokens"]
     return None
 
+def print_chunks(chunks):
+    """Print the first two and last two chunks as readable JSON."""
+    for i in [0, 1, -2, -1]:
+        print(f"--- chunks[{i}] ---")
+        print(chunks[i].model_dump_json(indent=2))
+
 
 def run_once(temperature):
     """One streamed call. Returns (ttft, total, tokens_in, tokens_out, text)."""
@@ -52,16 +58,19 @@ def run_once(temperature):
     t_first = None
     usage = None
     parts = []
+    chunks = []
 
-    stream = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        stream=True,
-        stream_options={"include_usage": True},  # ask for a final chunk with token counts
-    )
+    request = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    stream = client.chat.completions.create(**request)
+    
     for chunk in stream:
-        # The final usage chunk has an empty choices list: guard before choices[0]
+        chunks.append(chunk)
         if chunk.choices:
             text = chunk.choices[0].delta.content
             if text:  # the first chunk only carries the role, so skip empty content
@@ -70,10 +79,9 @@ def run_once(temperature):
                 parts.append(text)
         usage = read_usage(chunk) or usage
     t_end = time.perf_counter()
-
     ttft = (t_first - t_start) if t_first else None
     tokens_in, tokens_out = usage if usage else (None, None)
-    return ttft, t_end - t_start, tokens_in, tokens_out, "".join(parts)
+    return ttft, t_end - t_start, tokens_in, tokens_out, "".join(parts), chunks
 
 
 def show(value, number_format=""):
@@ -89,7 +97,7 @@ print(f"{'Temp':<5} {'Run':<4} {'TTFT(s)':>7} {'Total(s)':>8} {'In':>5} {'Out':>
 for temperature in TEMPERATURES:
     for run in range(1, RUNS_PER_TEMPERATURE + 1):
         try:
-            ttft, total, tokens_in, tokens_out, text = run_once(temperature)
+            ttft, total, tokens_in, tokens_out, text, chunks = run_once(temperature)
         except RateLimitError:
             print(f"{temperature:<5} {run:<4} {'429':>7}  rate limited, no retry (see PLAN.md)", flush=True)
             continue
@@ -101,4 +109,12 @@ for temperature in TEMPERATURES:
             f"{show(tokens_in):>5} {show(tokens_out):>5} {show(cost, '.6f'):>9}  {preview}",
             flush=True,
         )
+        print() 
+        if RUNS_PER_TEMPERATURE == 1:
+            print() 
+            print_chunks(chunks)
+            print() 
+        print() 
+
     print()  # blank line between temperature groups
+
